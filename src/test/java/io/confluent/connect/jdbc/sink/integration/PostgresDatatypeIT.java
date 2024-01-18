@@ -101,6 +101,59 @@ public class PostgresDatatypeIT extends BaseConnectorIT {
       stopConnect();
     }
   }
+  @Test
+  public void testNotNullColumnsWithDefaultAreCreated() throws Exception {
+    props.put(ERRORS_TOLERANCE_CONFIG, ToleranceType.ALL.value());
+    props.put(DLQ_TOPIC_NAME_CONFIG, DLQ_TOPIC_NAME);
+    props.put(DLQ_TOPIC_REPLICATION_FACTOR_CONFIG, "1");
+    props.put(MAX_RETRIES, "0");
+    props.put("auto.create", "true");
+    props.put("auto.evolve", "true");
+
+    createTable("CREATE TABLE %s(firstName TEXT PRIMARY KEY)");
+    connect.configureConnector("jdbc-sink-connector", props);
+    waitForConnectorToStart("jdbc-sink-connector", 1);
+
+    final Schema schema = SchemaBuilder.struct().name("com.example.Person")
+            .field("firstname", Schema.STRING_SCHEMA)
+            .field("lastname", SchemaBuilder.string().defaultValue("SANTURBANO"))
+            .build();
+    final Struct firstStruct = new Struct(schema)
+            .put("firstname", "Andrea")
+            .put("lastname", "Santurbano");
+
+    produceRecord(schema, firstStruct);
+
+    // Now, create and send another normal record
+    Struct secondStruct = new Struct(schema)
+            .put("firstname", "Federico");
+
+    produceRecord(schema, secondStruct);
+
+    Thread.sleep(TimeUnit.SECONDS.toMillis(30));
+
+//    waitForCommittedRecords("jdbc-sink-connector", Collections.singleton(tableName), 2, 1,
+//            TimeUnit.SECONDS.toMillis(30));
+
+
+    try (Connection c = pg.getEmbeddedPostgres().getPostgresDatabase().getConnection()) {
+      c.setAutoCommit(false);
+      try (Statement s = c.createStatement()) {
+        String sql = String.format(
+                "SELECT * FROM %s",
+                tableName
+        );
+        LOG.info("Executing statement: {}", sql);
+        ResultSet resultSet = s.executeQuery(sql);
+        while (resultSet.next()) {
+          for (int i = 1; i <= resultSet.getMetaData().getColumnCount(); i++) {
+            System.out.println(resultSet.getMetaData().getColumnName(i) + " = " + resultSet.getObject(i));
+          }
+        }
+
+      }
+    }
+  }
 
   /**
    * Verifies that even when the connector encounters exceptions that would cause a connection
@@ -335,6 +388,85 @@ public class PostgresDatatypeIT extends BaseConnectorIT {
           assertTrue(rs.next());
           assertEquals(secondStruct.getString("firstname"), rs.getString("firstname"));
           assertEquals(secondStruct.getString("lastname"), rs.getString("lastname"));
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testQuoteIdentifierNeverConfig() throws Exception {
+    String mixedCaseTopicName = "TestTopic";
+
+    connect.kafka().createTopic(mixedCaseTopicName, 1);
+
+    props.put(JdbcSinkConfig.AUTO_CREATE, "true");
+    props.put(JdbcSinkConfig.QUOTE_SQL_IDENTIFIERS_CONFIG, "NEVER");
+    props.put("topics", mixedCaseTopicName);
+
+    connect.configureConnector("jdbc-sink-connector", props);
+
+    waitForConnectorToStart("jdbc-sink-connector", 1);
+
+    final Schema schema = SchemaBuilder.struct().name("com.example.Person")
+        .field("firstname", Schema.STRING_SCHEMA)
+        .field("lastname", Schema.STRING_SCHEMA)
+        .build();
+    final Struct struct = new Struct(schema)
+        .put("firstname", "Christina")
+        .put("lastname", "Brams");
+
+    String kafkaValue = new String(jsonConverter.fromConnectData(mixedCaseTopicName, schema, struct));
+    connect.kafka().produce(mixedCaseTopicName, null, kafkaValue);
+
+    waitForCommittedRecords("jdbc-sink-connector", Collections.singleton(mixedCaseTopicName), 1, 1,
+        TimeUnit.MINUTES.toMillis(2));
+
+    String autoCreatedTableName = mixedCaseTopicName.toLowerCase();
+    try (Connection c = pg.getEmbeddedPostgres().getPostgresDatabase().getConnection()) {
+      try (Statement s = c.createStatement()) {
+        try (ResultSet rs = s.executeQuery(String.format("SELECT * FROM \"%s\"", autoCreatedTableName))) {
+          assertTrue(rs.next());
+          assertEquals(struct.getString("firstname"), rs.getString("firstname"));
+          assertEquals(struct.getString("lastname"), rs.getString("lastname"));
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testQuoteIdentifierAlwaysConfig() throws Exception {
+    String mixedCaseTopicName = "TestTopic";
+
+    connect.kafka().createTopic(mixedCaseTopicName, 1);
+
+    props.put(JdbcSinkConfig.AUTO_CREATE, "true");
+    props.put(JdbcSinkConfig.QUOTE_SQL_IDENTIFIERS_CONFIG, "ALWAYS");
+    props.put("topics", mixedCaseTopicName);
+
+    connect.configureConnector("jdbc-sink-connector", props);
+
+    waitForConnectorToStart("jdbc-sink-connector", 1);
+
+    final Schema schema = SchemaBuilder.struct().name("com.example.Person")
+        .field("firstname", Schema.STRING_SCHEMA)
+        .field("lastname", Schema.STRING_SCHEMA)
+        .build();
+    final Struct struct = new Struct(schema)
+        .put("firstname", "Christina")
+        .put("lastname", "Brams");
+
+    String kafkaValue = new String(jsonConverter.fromConnectData(mixedCaseTopicName, schema, struct));
+    connect.kafka().produce(mixedCaseTopicName, null, kafkaValue);
+
+    waitForCommittedRecords("jdbc-sink-connector", Collections.singleton(mixedCaseTopicName), 1, 1,
+        TimeUnit.MINUTES.toMillis(2));
+
+    try (Connection c = pg.getEmbeddedPostgres().getPostgresDatabase().getConnection()) {
+      try (Statement s = c.createStatement()) {
+        try (ResultSet rs = s.executeQuery(String.format("SELECT * FROM \"%s\"", mixedCaseTopicName))) {
+          assertTrue(rs.next());
+          assertEquals(struct.getString("firstname"), rs.getString("firstname"));
+          assertEquals(struct.getString("lastname"), rs.getString("lastname"));
         }
       }
     }
